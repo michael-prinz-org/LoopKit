@@ -31,13 +31,20 @@ public struct TherapySettingsView: View {
     @ObservedObject var viewModel: TherapySettingsViewModel
         
     private let actionButton: ActionButton?
+    private let headerContent: AnyView?
+    private let additionalContent: AnyView?
 
+    /// `headerContent` is shown as the first card, `additionalContent` as the last card (settings mode only).
     public init(mode: SettingsPresentationMode,
                 viewModel: TherapySettingsViewModel,
-                actionButton: ActionButton? = nil) {
+                actionButton: ActionButton? = nil,
+                headerContent: AnyView? = nil,
+                additionalContent: AnyView? = nil) {
         self.mode = mode
         self.viewModel = viewModel
         self.actionButton = actionButton
+        self.headerContent = headerContent
+        self.additionalContent = additionalContent
     }
         
     public var body: some View {
@@ -73,6 +80,9 @@ public struct TherapySettingsView: View {
     private var therapySettingsCardStack: CardStack {
         var cards: [Card] = []
 
+        if let headerContent = headerContent {
+            cards.append(Card { headerContent })
+        }
         if mode == .acceptanceFlow {
             if viewModel.prescription != nil {
                 cards.append(prescriptionSection)
@@ -93,6 +103,9 @@ public struct TherapySettingsView: View {
             cards.append(insulinModelSection)
         }
         cards.append(insulinSensitivitiesSection)
+        if mode == .settings, let additionalContent = additionalContent {
+            cards.append(Card { additionalContent })
+        }
 
         return CardStack(cards: cards)
     }

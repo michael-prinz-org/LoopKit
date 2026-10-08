@@ -203,6 +203,8 @@ public extension HKUnit {
             return 1
         case .milligramsPerDeciliterPerMinute:
             return 1
+        case HKUnit.gram().unitDivided(by: .internationalUnit()):
+            return 1
         default:
             return 0
         }

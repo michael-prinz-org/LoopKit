@@ -19,7 +19,7 @@ class HKUnitTests: XCTestCase {
         XCTAssertEqual(HKUnit.millimolesPerLiter.unitDivided(by: .minute()).preferredFractionDigits, 1)
 
         XCTAssertEqual(HKUnit.gram().preferredFractionDigits, 0)
-        XCTAssertEqual(HKUnit.gram().unitDivided(by: .internationalUnit()).preferredFractionDigits, 0)
+        XCTAssertEqual(HKUnit.gram().unitDivided(by: .internationalUnit()).preferredFractionDigits, 1)
         XCTAssertEqual(HKUnit.milligramsPerDeciliter.preferredFractionDigits, 0)
         XCTAssertEqual(HKUnit.milligramsPerDeciliter.unitDivided(by: .internationalUnit()).preferredFractionDigits, 0)
         XCTAssertEqual(HKUnit.milligramsPerDeciliter.unitDivided(by: .minute()).preferredFractionDigits, 1)
