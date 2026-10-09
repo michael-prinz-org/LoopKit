@@ -108,6 +108,21 @@ public final class DoseStore {
     }
     private let lockedBasalProfile: Locked<BasalRateSchedule?>
 
+    /// Converts pump units delivered at a date into the pump units in use now, e.g. 0.5 for U100 doses after
+    /// switching to U200, so dose history matches the current schedules. `nil` leaves doses unchanged.
+    public var pumpUnitScale: ((_ deliveryDate: Date) -> Double)? {
+        get { lockedPumpUnitScale.value }
+        set { lockedPumpUnitScale.value = newValue }
+    }
+    private let lockedPumpUnitScale = Locked<((_ deliveryDate: Date) -> Double)?>(nil)
+
+    /// Stored history carries the basal rate scheduled back then, so it is rescaled too; doses annotated from
+    /// the current schedule are already in current units.
+    private func inCurrentPumpUnits(_ doses: [DoseEntry], scheduledBasalRatesAreHistorical: Bool) -> [DoseEntry] {
+        guard let pumpUnitScale = pumpUnitScale else { return doses }
+        return doses.map { $0.scaled(by: pumpUnitScale($0.startDate), includingScheduledBasalRate: scheduledBasalRatesAreHistorical) }
+    }
+
     /// The basal profile, applying recent overrides relative to the current moment in time.
     public var basalProfileApplyingOverrideHistory: BasalRateSchedule? {
         if let basalProfile = basalProfile {
@@ -1206,8 +1221,9 @@ extension DoseStore {
             switch result {
             case .failure(let error):
                 completion(.failure(.persistenceError(description: error.localizedDescription, recoverySuggestion: nil)))
-            case .success(let insulinDeliveryDoses):
+            case .success(let storedDoses):
                 let filteredStart = max(self.lastPumpEventsReconciliation ?? start, start)
+                let insulinDeliveryDoses = self.inCurrentPumpUnits(storedDoses, scheduledBasalRatesAreHistorical: true)
 
                 self.persistenceController.managedObjectContext.perform {
                     do {
@@ -1215,14 +1231,15 @@ extension DoseStore {
 
                         // Reservoir data is used only if it's continuous and the pumpmanager hasn't reconciled since the last reservoir reading
                         if self.areReservoirValuesValid, let reservoirEndDate = self.lastStoredReservoirValue?.startDate, reservoirEndDate > self.lastPumpEventsReconciliation ?? .distantPast {
-                            let reservoirDoses = try self.getNormalizedReservoirDoseEntries(start: filteredStart, end: end)
+                            let reservoirDoses = try self.inCurrentPumpUnits(self.getNormalizedReservoirDoseEntries(start: filteredStart, end: end), scheduledBasalRatesAreHistorical: false)
                             let endOfReservoirData = self.lastStoredReservoirValue?.endDate ?? .distantPast
                             let startOfReservoirData = reservoirDoses.first?.startDate ?? filteredStart
-                            let mutableDoses = try self.getNormalizedMutablePumpEventDoseEntries(start: endOfReservoirData)
+                            let mutableDoses = try self.inCurrentPumpUnits(self.getNormalizedMutablePumpEventDoseEntries(start: endOfReservoirData), scheduledBasalRatesAreHistorical: false)
                             doses = insulinDeliveryDoses.map({ $0.trimmed(to: startOfReservoirData) }) + reservoirDoses + mutableDoses.map({ $0.trimmed(from: endOfReservoirData) })
                         } else {
                             // Deduplicates doses by syncIdentifier
-                            doses = insulinDeliveryDoses.appendedUnion(with: try self.getNormalizedPumpEventDoseEntries(start: filteredStart, end: end))
+                            let pumpEventDoses = try self.inCurrentPumpUnits(self.getNormalizedPumpEventDoseEntries(start: filteredStart, end: end), scheduledBasalRatesAreHistorical: true)
+                            doses = insulinDeliveryDoses.appendedUnion(with: pumpEventDoses)
                         }
 
                         // Extend an unfinished suspend out to end time
