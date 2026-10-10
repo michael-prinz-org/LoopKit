@@ -29,9 +29,16 @@ let MetadataKeyAutomaticallyIssued = "com.loopkit.InsulinKit.MetadataKeyAutomati
 /// Flag indicating whether this dose is a suspend
 let MetadataKeyIsSuspend = "com.loopkit.InsulinKit.MetadataKeyIsSuspend"
 
+/// International units per pump unit of the insulin delivered (e.g. 2 for U200); absent means 1
+let MetadataKeyUnitsPerPumpUnit = "com.loopkit.InsulinKit.MetadataKeyUnitsPerPumpUnit"
+
 extension HKQuantitySample {
-    convenience init?(type: HKQuantityType, unit: HKUnit, dose: DoseEntry, device: HKDevice?, provenanceIdentifier: String, syncVersion: Int = 1) {
-        let units = dose.unitsInDeliverableIncrements
+    /// - Parameter unitsPerPumpUnit: Converts the dose's pump units into the international units HealthKit records.
+    convenience init?(type: HKQuantityType, unit: HKUnit, dose: DoseEntry, device: HKDevice?, provenanceIdentifier: String, syncVersion: Int = 1, unitsPerPumpUnit: Double = 1) {
+        let units = dose.unitsInDeliverableIncrements * unitsPerPumpUnit
+        let scheduledRate = dose.scheduledBasalRate.map {
+            HKQuantity(unit: .internationalUnitsPerHour, doubleValue: $0.doubleValue(for: .internationalUnitsPerHour) * unitsPerPumpUnit)
+        }
 
         guard let syncIdentifier = dose.syncIdentifier else {
             return nil
@@ -43,12 +50,15 @@ extension HKQuantitySample {
             MetadataKeyHasLoopKitOrigin: true,
             MetadataKeyManuallyEntered: dose.manuallyEntered
         ]
+        if unitsPerPumpUnit != 1 {
+            metadata[MetadataKeyUnitsPerPumpUnit] = unitsPerPumpUnit
+        }
         
         switch dose.type {
         case .suspend:
             metadata[HKMetadataKeyInsulinDeliveryReason] = HKInsulinDeliveryReason.basal.rawValue
 
-            if let basalRate = dose.scheduledBasalRate {
+            if let basalRate = scheduledRate {
                 metadata[MetadataKeyScheduledBasalRate] = basalRate
             }
             metadata[MetadataKeyIsSuspend] = true
@@ -61,12 +71,12 @@ extension HKQuantitySample {
 
             metadata[HKMetadataKeyInsulinDeliveryReason] = HKInsulinDeliveryReason.basal.rawValue
 
-            if let basalRate = dose.scheduledBasalRate {
+            if let basalRate = scheduledRate {
                 metadata[MetadataKeyScheduledBasalRate] = basalRate
             }
 
             if dose.type == .tempBasal {
-                metadata[MetadataKeyProgrammedTempBasalRate] = HKQuantity(unit: .internationalUnitsPerHour, doubleValue: dose.unitsPerHour)
+                metadata[MetadataKeyProgrammedTempBasalRate] = HKQuantity(unit: .internationalUnitsPerHour, doubleValue: dose.unitsPerHour * unitsPerPumpUnit)
             }
 
             metadata[MetadataKeyIsSuspend] = dose.type == .suspend
@@ -116,11 +126,30 @@ extension HKQuantitySample {
     }
 
     var scheduledBasalRate: HKQuantity? {
-        return metadata?[MetadataKeyScheduledBasalRate] as? HKQuantity
+        inPumpUnits(metadata?[MetadataKeyScheduledBasalRate] as? HKQuantity)
     }
 
     var programmedTempBasalRate: HKQuantity? {
-        return metadata?[MetadataKeyProgrammedTempBasalRate] as? HKQuantity
+        inPumpUnits(metadata?[MetadataKeyProgrammedTempBasalRate] as? HKQuantity)
+    }
+
+    var unitsPerPumpUnit: Double {
+        metadata?[MetadataKeyUnitsPerPumpUnit] as? Double ?? 1
+    }
+
+    /// The delivered amount in the pump units Loop's dose history uses.
+    var pumpUnits: Double {
+        quantity.doubleValue(for: .internationalUnit()) / unitsPerPumpUnit
+    }
+
+    /// Like `pumpUnits`; samples from other apps (pens etc.) are international units and use `externalUnitsPerPumpUnit`.
+    func importedPumpUnits(externalUnitsPerPumpUnit: Double) -> Double {
+        hasLoopKitOrigin ? pumpUnits : quantity.doubleValue(for: .internationalUnit()) / externalUnitsPerPumpUnit
+    }
+
+    private func inPumpUnits(_ rate: HKQuantity?) -> HKQuantity? {
+        guard let rate = rate, unitsPerPumpUnit != 1 else { return rate }
+        return HKQuantity(unit: .internationalUnitsPerHour, doubleValue: rate.doubleValue(for: .internationalUnitsPerHour) / unitsPerPumpUnit)
     }
 
     var isSuspend: Bool {
@@ -179,9 +208,9 @@ extension HKQuantitySample {
         if let programmedRate = programmedTempBasalRate {
             value = programmedRate.doubleValue(for: .internationalUnitsPerHour)
             unit = .unitsPerHour
-            deliveredUnits = quantity.doubleValue(for: .internationalUnit())
+            deliveredUnits = pumpUnits
         } else {
-            value = quantity.doubleValue(for: .internationalUnit())
+            value = pumpUnits
             unit = .units
             deliveredUnits = nil
         }

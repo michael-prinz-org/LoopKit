@@ -185,14 +185,14 @@ extension CachedInsulinDeliveryObject {
 }
 
 extension CachedInsulinDeliveryObject {
-    func create(fromExisting sample: HKQuantitySample, on date: Date = Date()) {
+    func create(fromExisting sample: HKQuantitySample, on date: Date = Date(), externalUnitsPerPumpUnit: Double = 1) {
         self.uuid = sample.uuid
         self.provenanceIdentifier = sample.provenanceIdentifier
         self.hasLoopKitOrigin = sample.hasLoopKitOrigin
         self.startDate = sample.startDate
         self.endDate = sample.endDate
         self.syncIdentifier = sample.syncIdentifier ?? sample.uuid.uuidString // External doses might not have a syncIdentifier, so use the UUID
-        self.value = sample.quantity.doubleValue(for: .internationalUnit())
+        self.value = sample.importedPumpUnits(externalUnitsPerPumpUnit: externalUnitsPerPumpUnit)
         self.scheduledBasalRate = sample.scheduledBasalRate
         self.programmedTempBasalRate = sample.programmedTempBasalRate
         self.insulinType = sample.insulinType

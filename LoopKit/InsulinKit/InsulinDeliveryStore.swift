@@ -63,6 +63,14 @@ public class InsulinDeliveryStore {
 
     public let hkSampleStore: HealthKitSampleStore?
 
+    /// International units per pump unit at a delivery date (e.g. 2 while U200 is in use), so HealthKit records the
+    /// insulin actually delivered. `nil` writes pump units unchanged.
+    public var unitsPerPumpUnit: ((_ deliveryDate: Date) -> Double)? {
+        get { lockedUnitsPerPumpUnit.value }
+        set { lockedUnitsPerPumpUnit.value = newValue }
+    }
+    private let lockedUnitsPerPumpUnit = Locked<((_ deliveryDate: Date) -> Double)?>(nil)
+
     /// The interval of insulin delivery data to keep in cache
     public let cacheLength: TimeInterval
 
@@ -445,7 +453,8 @@ extension InsulinDeliveryStore {
                                                                     dose: entry,
                                                                     device: device,
                                                                     provenanceIdentifier: self.provenanceIdentifier,
-                                                                    syncVersion: syncVersion)
+                                                                    syncVersion: syncVersion,
+                                                                    unitsPerPumpUnit: self.unitsPerPumpUnit?(entry.startDate) ?? 1)
                         else {
                             self.log.error("Failure to create HKQuantitySample from DoseEntry: %{public}@", String(describing: entry))
                             return nil
@@ -621,7 +630,7 @@ extension InsulinDeliveryStore {
 
         // Add an object for this UUID
         let object = CachedInsulinDeliveryObject(context: cacheStore.managedObjectContext)
-        object.create(fromExisting: sample, on: self.currentDate())
+        object.create(fromExisting: sample, on: self.currentDate(), externalUnitsPerPumpUnit: unitsPerPumpUnit?(sample.startDate) ?? 1)
 
         return true
     }

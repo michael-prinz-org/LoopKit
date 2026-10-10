@@ -59,7 +59,7 @@ public struct DoseEntry: TimelineValue, Equatable {
 extension DoseEntry {
     /// The same dose in other insulin units, e.g. 0.5 for U100 doses while U200 is in use. Pass `false` for
     /// `includingScheduledBasalRate` when the rate was annotated from a schedule already in the new units.
-    func scaled(by factor: Double, includingScheduledBasalRate: Bool) -> DoseEntry {
+    public func scaled(by factor: Double, includingScheduledBasalRate: Bool) -> DoseEntry {
         guard factor != 1 else { return self }
         let rate = includingScheduledBasalRate
             ? scheduledBasalRate.map { HKQuantity(unit: DoseEntry.unitsPerHour, doubleValue: $0.doubleValue(for: DoseEntry.unitsPerHour) * factor) }
