@@ -164,6 +164,96 @@ class DoseStoreTests: PersistenceControllerTestCase {
         waitForExpectations(timeout: 30)
     }
 
+    private func normalizedDoses(_ doseStore: DoseStore, start: Date, end: Date) -> [DoseEntry] {
+        let fetched = expectation(description: "doses fetched")
+        var doses: [DoseEntry] = []
+        doseStore.getNormalizedDoseEntries(start: start, end: end) { result in
+            switch result {
+            case .failure(let error):
+                XCTFail("Unexpected error: \(error)")
+            case .success(let entries):
+                doses = entries
+            }
+            fetched.fulfill()
+        }
+        wait(for: [fetched], timeout: 30)
+        return doses
+    }
+
+    func testPumpUnitScaleAppliesOnceToReservoirAndPumpEventDoses() {
+        let now = testingDate("2022-09-05 02:04:00 +0000")
+        let doseStore = defaultStore(testingDate: now)
+
+        let reservoirReadings = loadReservoirFixture("reservoir_iob_test")
+        let stored = expectation(description: "stored")
+        stored.expectedFulfillmentCount = reservoirReadings.count + 1
+        for reading in reservoirReadings.reversed() {
+            doseStore.addReservoirValue(reading.unitVolume, at: reading.startDate) { _, _, _, _ in stored.fulfill() }
+        }
+        let bolus = DoseEntry(type: .bolus, startDate: testingDate("2022-09-05 01:49:47 +0000"), endDate: testingDate("2022-09-05 01:51:19 +0000"), value: 2.3, unit: .units, isMutable: true)
+        doseStore.addPumpEvents([NewPumpEvent(date: bolus.startDate, dose: bolus, raw: Data(hexadecimalString: "0000")!, title: "Bolus 2.3U")], lastReconciliation: testingDate("2022-09-05 01:50:18 +0000")) { _ in
+            stored.fulfill()
+        }
+        waitForExpectations(timeout: 30)
+
+        let start = testingDate("2022-09-05 00:00:00 +0000")
+        let unscaled = normalizedDoses(doseStore, start: start, end: now)
+        doseStore.pumpUnitScale = { _ in 0.5 }
+        let scaled = normalizedDoses(doseStore, start: start, end: now)
+
+        XCTAssertTrue(unscaled.contains { $0.syncIdentifier == nil }, "expected reservoir doses")
+        XCTAssertEqual(scaled.count, unscaled.count)
+        for (scaledDose, dose) in zip(scaled, unscaled) {
+            XCTAssertEqual(scaledDose.value, dose.value * 0.5, accuracy: 1e-9)
+            XCTAssertEqual(scaledDose.deliveredUnits ?? 0, (dose.deliveredUnits ?? 0) * 0.5, accuracy: 1e-9)
+            if dose.syncIdentifier == nil {
+                // Reservoir doses are annotated from the current schedule, which is already in current pump units.
+                XCTAssertEqual(scaledDose.scheduledBasalRate, dose.scheduledBasalRate)
+            }
+        }
+    }
+
+    func testPumpUnitScaleUsesDeliveryDate() {
+        let now = testingDate("2022-09-05 02:04:00 +0000")
+        let doseStore = defaultStore(testingDate: now)
+        let switchDate = testingDate("2022-09-05 01:30:00 +0000")
+
+        let early = DoseEntry(type: .bolus, startDate: testingDate("2022-09-05 01:00:00 +0000"), endDate: testingDate("2022-09-05 01:01:00 +0000"), value: 2.0, unit: .units)
+        let late = DoseEntry(type: .bolus, startDate: testingDate("2022-09-05 01:45:00 +0000"), endDate: testingDate("2022-09-05 01:46:00 +0000"), value: 2.0, unit: .units)
+        let added = expectation(description: "pump events added")
+        doseStore.addPumpEvents([
+            NewPumpEvent(date: early.startDate, dose: early, raw: Data(hexadecimalString: "0a01")!, title: "Bolus 2U"),
+            NewPumpEvent(date: late.startDate, dose: late, raw: Data(hexadecimalString: "0a02")!, title: "Bolus 2U")
+        ], lastReconciliation: testingDate("2022-09-05 00:30:00 +0000")) { _ in
+            added.fulfill()
+        }
+        waitForExpectations(timeout: 30)
+
+        doseStore.pumpUnitScale = { $0 < switchDate ? 0.5 : 1 }
+        let boluses = normalizedDoses(doseStore, start: testingDate("2022-09-05 00:00:00 +0000"), end: now).filter { $0.type == .bolus }
+
+        XCTAssertEqual(boluses.map { $0.syncIdentifier }, ["0a01", "0a02"])
+        XCTAssertEqual(boluses.map { $0.deliveredUnits ?? $0.value }, [1.0, 2.0])
+    }
+
+    func testPumpUnitScaleRescalesHistoricalScheduledBasalRateOfStoredDoses() {
+        let now = testingDate("2022-09-05 02:04:00 +0000")
+        let doseStore = defaultStore(testingDate: now)
+        let tempBasal = DoseEntry(type: .tempBasal, startDate: testingDate("2022-09-05 01:00:00 +0000"), endDate: testingDate("2022-09-05 01:30:00 +0000"), value: 1.0, unit: .unitsPerHour, syncIdentifier: "stored-temp", scheduledBasalRate: HKQuantity(unit: DoseEntry.unitsPerHour, doubleValue: 0.8))
+        let added = expectation(description: "dose added")
+        // addDoses calls its completion once after storing and once after syncing pump events.
+        added.assertForOverFulfill = false
+        doseStore.addDoses([tempBasal], from: nil) { _ in added.fulfill() }
+        waitForExpectations(timeout: 30)
+
+        doseStore.pumpUnitScale = { _ in 0.5 }
+        let stored = normalizedDoses(doseStore, start: testingDate("2022-09-05 00:00:00 +0000"), end: now).filter { $0.syncIdentifier == "stored-temp" }
+
+        XCTAssertEqual(stored.count, 1)
+        XCTAssertEqual(stored.first?.unitsPerHour ?? 0, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(stored.first?.scheduledBasalRate?.doubleValue(for: DoseEntry.unitsPerHour) ?? 0, 0.4, accuracy: 1e-9)
+    }
+
     
     func testPumpEventTypeDoseMigration() {
         cacheStore.managedObjectContext.performAndWait {
@@ -1599,6 +1689,63 @@ class DoseStoreEffectTests: PersistenceControllerTestCase {
         for (expected, calculated) in zip(output, insulinEffects) {
             XCTAssertEqual(expected.startDate, calculated.startDate)
             XCTAssertEqual(expected.quantity.doubleValue(for: HKUnit.milligramsPerDeciliter), calculated.quantity.doubleValue(for: HKUnit.milligramsPerDeciliter), accuracy: 1.0, String(describing: expected.startDate))
+        }
+    }
+}
+
+/// HealthKit stores international units; reading back yields the pump units Loop doses in.
+class DoseStoreHealthKitUnitsTests: XCTestCase {
+    private let start = Date(timeIntervalSince1970: 1_699_920_000)
+    private let scheduledRate = HKQuantity(unit: DoseEntry.unitsPerHour, doubleValue: 0.8)
+
+    private func sample(_ dose: DoseEntry, unitsPerPumpUnit: Double) -> HKQuantitySample {
+        HKQuantitySample(type: HealthKitSampleStore.insulinQuantityType, unit: .internationalUnit(), dose: dose, device: nil, provenanceIdentifier: "test", unitsPerPumpUnit: unitsPerPumpUnit)!
+    }
+
+    private func internationalUnits(_ sample: HKQuantitySample) -> Double {
+        sample.quantity.doubleValue(for: .internationalUnit())
+    }
+
+    func testBolusRoundTrip() {
+        let bolus = DoseEntry(type: .bolus, startDate: start, endDate: start.addingTimeInterval(60), value: 1.5, unit: .units, syncIdentifier: "bolus")
+
+        let u200 = sample(bolus, unitsPerPumpUnit: 2)
+        XCTAssertEqual(internationalUnits(u200), 3.0, accuracy: 1e-9)
+        XCTAssertEqual(u200.metadata?[MetadataKeyUnitsPerPumpUnit] as? Double, 2)
+        XCTAssertEqual(u200.dose?.type, .bolus)
+        XCTAssertEqual(u200.dose?.value ?? 0, 1.5, accuracy: 1e-9)
+
+        let u100 = sample(bolus, unitsPerPumpUnit: 1)
+        XCTAssertEqual(internationalUnits(u100), 1.5, accuracy: 1e-9)
+        XCTAssertNil(u100.metadata?[MetadataKeyUnitsPerPumpUnit])
+        XCTAssertEqual(u100.dose?.value ?? 0, 1.5, accuracy: 1e-9)
+    }
+
+    func testTempBasalRoundTrip() {
+        let tempBasal = DoseEntry(type: .tempBasal, startDate: start, endDate: start.addingTimeInterval(.minutes(30)), value: 1.0, unit: .unitsPerHour, syncIdentifier: "temp", scheduledBasalRate: scheduledRate)
+
+        for unitsPerPumpUnit in [1.0, 2.0] {
+            let stored = sample(tempBasal, unitsPerPumpUnit: unitsPerPumpUnit)
+            XCTAssertEqual(internationalUnits(stored), 0.5 * unitsPerPumpUnit, accuracy: 1e-9)
+            XCTAssertEqual(stored.metadata?[MetadataKeyUnitsPerPumpUnit] as? Double, unitsPerPumpUnit == 1 ? nil : unitsPerPumpUnit)
+            let dose = stored.dose
+            XCTAssertEqual(dose?.type, .tempBasal)
+            XCTAssertEqual(dose?.unitsPerHour ?? 0, 1.0, accuracy: 1e-9)
+            XCTAssertEqual(dose?.deliveredUnits ?? 0, 0.5, accuracy: 1e-9)
+            XCTAssertEqual(dose?.scheduledBasalRate?.doubleValue(for: DoseEntry.unitsPerHour) ?? 0, 0.8, accuracy: 1e-9)
+        }
+    }
+
+    func testSuspendRoundTrip() {
+        let suspend = DoseEntry(type: .suspend, startDate: start, endDate: start.addingTimeInterval(.minutes(30)), value: 0, unit: .units, syncIdentifier: "suspend", scheduledBasalRate: scheduledRate)
+
+        for unitsPerPumpUnit in [1.0, 2.0] {
+            let stored = sample(suspend, unitsPerPumpUnit: unitsPerPumpUnit)
+            XCTAssertEqual(internationalUnits(stored), 0, accuracy: 1e-9)
+            XCTAssertEqual((stored.metadata?[MetadataKeyScheduledBasalRate] as? HKQuantity)?.doubleValue(for: DoseEntry.unitsPerHour) ?? 0, 0.8 * unitsPerPumpUnit, accuracy: 1e-9)
+            let dose = stored.dose
+            XCTAssertEqual(dose?.type, .suspend)
+            XCTAssertEqual(dose?.scheduledBasalRate?.doubleValue(for: DoseEntry.unitsPerHour) ?? 0, 0.8, accuracy: 1e-9)
         }
     }
 }
