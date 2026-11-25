@@ -643,6 +643,46 @@ extension Collection where Element == DoseEntry {
         return values
     }
 
+    /// Calculates the timeline of glucose effects for a collection of doses, each with its own insulin sensitivity (e.g. Dynamic ISF).
+    ///
+    /// - Parameters:
+    ///   - insulinModelProvider: A factory that can provide an insulin model given an insulin type
+    ///   - longestEffectDuration: The longest duration that a dose could be active.
+    ///   - insulinSensitivityForDose: Glucose effect per unit of insulin for a dose, in mg/dL
+    ///   - start: The earliest date of effects to return
+    ///   - end: The latest date of effects to return
+    ///   - delta: The interval between returned effects
+    /// - Returns: An array of glucose effects for the duration of the doses
+    public func glucoseEffects(
+        insulinModelProvider: InsulinModelProvider,
+        longestEffectDuration: TimeInterval,
+        insulinSensitivityForDose: (DoseEntry) -> Double,
+        from start: Date? = nil,
+        to end: Date? = nil,
+        delta: TimeInterval = TimeInterval(/* minutes: */60 * 5)
+    ) -> [GlucoseEffect] {
+        let activeDoses = self.filter { $0.netBasalUnits != 0 }
+        guard let (start, end) = LoopMath.simulationDateRangeForSamples(activeDoses, from: start, to: end, duration: longestEffectDuration, delta: delta) else {
+            return []
+        }
+
+        let doses = activeDoses.map { (dose: $0, insulinSensitivity: insulinSensitivityForDose($0)) }
+        var date = start
+        var values = [GlucoseEffect]()
+        let unit = HKUnit.milligramsPerDeciliter
+
+        repeat {
+            let value = doses.reduce(0) { (value, entry) -> Double in
+                value + entry.dose.glucoseEffect(at: date, model: insulinModelProvider.model(for: entry.dose.insulinType), insulinSensitivity: entry.insulinSensitivity, delta: delta)
+            }
+
+            values.append(GlucoseEffect(startDate: date, quantity: HKQuantity(unit: unit, doubleValue: value)))
+            date = date.addingTimeInterval(delta)
+        } while date <= end
+
+        return values
+    }
+
     /// Calculates the timeline of glucose effects for a collection of doses. The ISF used for a given dose is based on the ISF in effect at the dose start time.
     ///
     /// - Parameters:
