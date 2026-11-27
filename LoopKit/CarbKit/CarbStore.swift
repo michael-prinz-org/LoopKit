@@ -163,11 +163,11 @@ public final class CarbStore {
     private let lockedInsulinSensitivityAtEntryStart = Locked<((Date) -> HKQuantity?)?>(nil)
 
     /// Insulin sensitivities covering `entryDates`: one value per entry start date, or the schedule between `start` and `end`.
-    private func insulinSensitivityTimeline(start: Date, end: Date, entryDates: [Date], usingScheduledInsulinSensitivity: Bool) -> [AbsoluteScheduleValue<HKQuantity>]? {
+    private func insulinSensitivityTimeline(start: Date, end: Date, entryDates: [Date], usingScheduledInsulinSensitivity: Bool, insulinSensitivityAtEntryStart sensitivityOverride: ((Date) -> HKQuantity?)? = nil) -> [AbsoluteScheduleValue<HKQuantity>]? {
         guard let scheduled = insulinSensitivityScheduleApplyingOverrideHistory?.quantitiesBetween(start: start, end: end) else {
             return nil
         }
-        guard !usingScheduledInsulinSensitivity, let sensitivityAtEntryStart = insulinSensitivityAtEntryStart, !entryDates.isEmpty else {
+        guard !usingScheduledInsulinSensitivity, let sensitivityAtEntryStart = sensitivityOverride ?? insulinSensitivityAtEntryStart, !entryDates.isEmpty else {
             return scheduled
         }
         let dates = Set(entryDates).sorted()
@@ -1228,6 +1228,21 @@ extension CarbStore {
         endingAt end: Date? = nil,
         effectVelocities: [GlucoseEffectVelocity]
     ) throws -> [GlucoseEffect] {
+        try glucoseEffects(of: samples, startingAt: start, endingAt: end, effectVelocities: effectVelocities, usingScheduledInsulinSensitivity: false, insulinSensitivityAtEntryStart: nil)
+    }
+
+    /// Like `glucoseEffects(of:startingAt:endingAt:effectVelocities:)`.
+    /// - Parameters:
+    ///   - usingScheduledInsulinSensitivity: Ignores `insulinSensitivityAtEntryStart`
+    ///   - sensitivityOverride: Replaces `insulinSensitivityAtEntryStart` for this call, e.g. to preview Dynamic ISF
+    public func glucoseEffects<Sample: CarbEntry>(
+        of samples: [Sample],
+        startingAt start: Date,
+        endingAt end: Date?,
+        effectVelocities: [GlucoseEffectVelocity],
+        usingScheduledInsulinSensitivity: Bool,
+        insulinSensitivityAtEntryStart sensitivityOverride: ((Date) -> HKQuantity?)?
+    ) throws -> [GlucoseEffect] {
 
         guard samples.count > 0 else {
             return []
@@ -1238,7 +1253,7 @@ extension CarbStore {
         let minCarbDate = carbDates.min()!
 
         guard let carbRatio = self.carbRatioScheduleApplyingOverrideHistory?.between(start: minCarbDate, end: maxCarbDate),
-              let insulinSensitivity = insulinSensitivityTimeline(start: minCarbDate, end: maxCarbDate, entryDates: carbDates, usingScheduledInsulinSensitivity: false) else
+              let insulinSensitivity = insulinSensitivityTimeline(start: minCarbDate, end: maxCarbDate, entryDates: carbDates, usingScheduledInsulinSensitivity: usingScheduledInsulinSensitivity, insulinSensitivityAtEntryStart: sensitivityOverride) else
         {
             throw CarbStoreError.notConfigured
         }
